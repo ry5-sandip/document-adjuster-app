@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document Adjuster</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Inter Font -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        /* Custom scrollbar for better aesthetics */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 10px;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 10px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+    </style>
+    <!-- React CDN -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <!-- Babel for JSX transformation -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- jsPDF library -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+</head>
+<body class="bg-gradient-to-br from-blue-50 to-indigo-100 min-h-screen flex items-center justify-center p-4">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        // Helper function to format file sizes
+        const formatBytes = (bytes, decimals = 2) => {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const dm = decimals < 0 ? 0 : decimals;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+        };
+
+        // Main App component
+        const App = () => {
+            // State to hold the selected files (array for multiple files)
+            const [selectedFiles, setSelectedFiles] = React.useState([]);
+            // State to hold processed image URLs for preview and download
+            const [processedFiles, setProcessedFiles] = React.useState([]); // Array of { file: File, url: string, settings: {} }
+            // State for loading indicator for general processing
+            const [isLoading, setIsLoading] = React.useState(false);
+            // State for error messages
+            const [error, setError] = React.useState('');
+            // State to track if jsPDF is loaded
+            const [isJsPdfLoaded, setIsJsPdfLoaded] = React.useState(false);
+
+            // Ref for the hidden file input element
+            const fileInputRef = React.useRef(null);
+
+            // Effect to dynamically load jsPDF (though now it's in the head, this serves as a check)
+            React.useEffect(() => {
+                // Check if jsPDF is already loaded
+                if (typeof window.jspdf !== 'undefined' && typeof window.jspdf.jsPDF !== 'undefined') {
+                    setIsJsPdfLoaded(true);
+                    return;
+                }
+                // If not loaded, it means the CDN might have failed or there's a delay.
+                // In this static HTML, it's expected to be loaded via the script tag in <head>.
+                // This useEffect acts as a fallback check.
+                const checkJsPdf = setTimeout(() => {
+                    if (typeof window.jspdf !== 'undefined' && typeof window.jspdf.jsPDF !== 'undefined') {
+                        setIsJsPdfLoaded(true);
+                        console.log("jsPDF confirmed loaded after timeout.");
+                    } else {
+                        setError("PDF generation library not detected. PDF output may not work.");
+                        console.error("jsPDF not loaded after initial check and timeout.");
+                    }
+                }, 1000); // Give it a moment to load
+
+                return () => clearTimeout(checkJsPdf);
+            }, []); // Empty dependency array means this runs once on mount
+
+
+            // Function to handle file selection from the input
+            const handleFileChange = (event) => {
+                const files = Array.from(event.target.files);
+                if (files.length > 0) {
+                    // Clear previous states
+                    setProcessedFiles([]);
+                    setError('');
+
+                    const newFiles = files.map(file => {
+                        // Basic validation for image types
+                        if (!file.type.startsWith('image/')) {
+                            setError('Please upload only image files (e.g., JPG, PNG, GIF). PDF files are not supported for initial upload.');
+                            return null; // Mark as invalid
+                        }
+                        return {
+                            file: file,
+                            id: `${file.name}-${Date.now()}-${Math.random()}`, // Unique ID for keying in lists
+                            desiredWidth: '',
+                            desiredHeight: '',
+                            outputFormat: 'image/png', // Default to PNG for images
+                            quality: 90, // New state for image quality (0-100)
+                            processedUrl: null,
+                            processedSize: null, // New state for processed file size
+                            processingError: null,
+                            altText: '', // New state for alt text
+                            isGeneratingAltText: false, // New state for alt text loading
+                        };
+                    }).filter(Boolean); // Filter out nulls (invalid files)
+
+                    setSelectedFiles(prev => [...prev, ...newFiles]); // Add new files to existing ones
+                }
+            };
+
+            // Function to trigger the hidden file input click
+            const handleUploadButtonClick = () => {
+                fileInputRef.current.click();
+            };
+
+            // Function to update settings for a specific file
+            const updateFileSetting = (id, setting, value) => {
+                setSelectedFiles(prevFiles =>
+                    prevFiles.map(file =>
+                        file.id === id ? { ...file, [setting]: value } : file
+                    )
+                );
+            };
+
+            // Function to remove a file from the selection
+            const removeFile = (id) => {
+                setSelectedFiles(prevFiles => prevFiles.filter(file => file.id !== id));
+            };
+
+            // Function to process all selected images
+            const processAllImages = async () => {
+                if (selectedFiles.length === 0) {
+                    setError('Please select at least one file to process.');
+                    return;
+                }
+
+                setIsLoading(true);
+                setError('');
+                setProcessedFiles([]); // Clear previous processed results
+
+                const processedResults = [];
+
+                for (const fileItem of selectedFiles) {
+                    const { file, id, desiredWidth, desiredHeight, outputFormat, quality } = fileItem;
+
+                    if (!file.type.startsWith('image/')) {
+                        processedResults.push({ ...fileItem, processingError: 'Not an image file.' });
+                        continue;
+                    }
+
+                    try {
+                        const { dataUrl, size } = await new Promise((resolve, reject) => {
+                            const reader = new FileReader();
+                            reader.onload = (e) => {
+                                const img = new Image();
+                                img.onload = () => {
+                                    const canvas = document.createElement('canvas');
+                                    const ctx = canvas.getContext('2d');
+
+                                    let newWidth = desiredWidth ? parseInt(desiredWidth, 10) : img.width;
+                                    let newHeight = desiredHeight ? parseInt(desiredHeight, 10) : img.height;
+
+                                    // Maintain aspect ratio if only one dimension is provided
+                                    if (desiredWidth && !desiredHeight) {
+                                        newHeight = Math.round((img.height / img.width) * newWidth);
+                                    } else if (!desiredWidth && desiredHeight) {
+                                        newWidth = Math.round((img.width / img.height) * newHeight);
+                                    }
+
+                                    canvas.width = newWidth;
+                                    canvas.height = newHeight;
+
+                                    ctx.drawImage(img, 0, 0, newWidth, newHeight);
+
+                                    let outputDataUrl;
+                                    if (outputFormat === 'application/pdf') {
+                                        if (!isJsPdfLoaded || typeof window.jspdf === 'undefined' || typeof window.jspdf.jsPDF === 'undefined') {
+                                            reject(new Error('jsPDF library is not fully loaded. Please try again.'));
+                                            return;
+                                        }
+                                        const pdf = new window.jspdf.jsPDF({
+                                            orientation: newWidth > newHeight ? 'landscape' : 'portrait',
+                                            unit: 'px',
+                                            format: [newWidth, newHeight]
+                                        });
+                                        const imgData = canvas.toDataURL('image/jpeg', Math.max(0.01, Math.min(1, quality / 100)));
+                                        pdf.addImage(imgData, 'JPEG', 0, 0, newWidth, newHeight);
+                                        outputDataUrl = pdf.output('datauristring');
+                                    } else {
+                                        const outputQuality = (outputFormat === 'image/jpeg' || outputFormat === 'image/webp')
+                                            ? Math.max(0.01, Math.min(1, quality / 100))
+                                            : undefined;
+                                        outputDataUrl = canvas.toDataURL(outputFormat, outputQuality);
+                                    }
+
+                                    const base64String = outputDataUrl.split(',')[1];
+                                    const actualSize = Math.round(base64String.length * 0.75);
+
+                                    resolve({ dataUrl: outputDataUrl, size: actualSize });
+
+                                };
+                                img.onerror = () => reject(new Error('Could not load image.'));
+                                img.src = e.target.result;
+                            };
+                            reader.onerror = () => reject(new Error('Error reading file.'));
+                            reader.readAsDataURL(file);
+                        });
+
+                        processedResults.push({ ...fileItem, processedUrl: dataUrl, processedSize: size, processingError: null });
+                    } catch (err) {
+                        console.error(`Error processing ${file.name}:`, err);
+                        processedResults.push({ ...fileItem, processingError: err.message });
+                    }
+                }
+
+                setProcessedFiles(processedResults);
+                setIsLoading(false);
+            };
+
+            // Function to download a single processed image/PDF
+            const downloadProcessedImage = (fileItem) => {
+                if (fileItem.processedUrl) {
+                    const link = document.createElement('a');
+                    link.href = fileItem.processedUrl;
+                    const originalFileName = fileItem.file.name.split('.').slice(0, -1).join('.');
+                    const fileExtension = fileItem.outputFormat.split('/')[1] || 'pdf';
+                    link.download = `${originalFileName}_modified.${fileExtension}`;
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                }
+            };
+
+            // Function to generate alt text using Gemini API
+            const generateAltText = async (fileId) => {
+                const fileItem = selectedFiles.find(f => f.id === fileId);
+                if (!fileItem || !fileItem.file.type.startsWith('image/')) {
+                    updateFileSetting(fileId, 'altText', 'Cannot generate alt text for non-image files.');
+                    return;
+                }
+
+                updateFileSetting(fileId, 'isGeneratingAltText', true);
+                updateFileSetting(fileId, 'altText', 'Generating...');
+
+                try {
+                    const base64ImageData = await new Promise((resolve, reject) => {
+                        const reader = new FileReader();
+                        reader.onloadend = () => {
+                            const base64 = reader.result.split(',')[1];
+                            resolve(base64);
+                        };
+                        reader.onerror = reject;
+                        reader.readAsDataURL(fileItem.file);
+                    });
+
+                    let chatHistory = [];
+                    const prompt = "Describe this image concisely for an alt text attribute, focusing on key visual elements and purpose. Max 150 characters.";
+                    chatHistory.push({ role: "user", parts: [{ text: prompt }] });
+
+                    const payload = {
+                        contents: [
+                            {
+                                role: "user",
+                                parts: [
+                                    { text: prompt },
+                                    {
+                                        inlineData: {
+                                            mimeType: fileItem.file.type,
+                                            data: base64ImageData
+                                        }
+                                    }
+                                ]
+                            }
+                        ],
+                    };
+
+                    const apiKey = ""; // Canvas will provide this at runtime
+                    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+
+                    const response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    const result = await response.json();
+
+                    if (result.candidates && result.candidates.length > 0 &&
+                        result.candidates[0].content && result.candidates[0].content.parts &&
+                        result.candidates[0].content.parts.length > 0) {
+                        const text = result.candidates[0].content.parts[0].text;
+                        updateFileSetting(fileId, 'altText', text);
+                    } else {
+                        updateFileSetting(fileId, 'altText', 'Could not generate alt text.');
+                        console.error("Gemini API response structure unexpected:", result);
+                    }
+                } catch (err) {
+                    console.error("Error generating alt text:", err);
+                    updateFileSetting(fileId, 'altText', `Error: ${err.message}`);
+                } finally {
+                    updateFileSetting(fileId, 'isGeneratingAltText', false);
+                }
+            };
+
+
+            return (
+                <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-4xl border border-gray-200">
+                    <h1 className="text-4xl font-extrabold text-center text-gray-800 mb-4 tracking-tight">
+                        Document Adjuster
+                    </h1>
+                    <p className="text-center text-gray-600 mb-8 text-lg">
+                        Easily resize, convert, and prepare your image documents for any website requirement.
+                    </p>
+
+                    {/* File Upload Section */}
+                    <div className="mb-6 border-2 border-dashed border-blue-300 rounded-xl p-6 text-center bg-blue-50 hover:bg-blue-100 transition duration-300 ease-in-out">
+                        <input
+                            type="file"
+                            ref={fileInputRef}
+                            onChange={handleFileChange}
+                            accept="image/*"
+                            multiple
+                            className="hidden"
+                        />
+                        <button
+                            onClick={handleUploadButtonClick}
+                            className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-full shadow-lg transform transition duration-300 ease-in-out hover:scale-105 focus:outline-none focus:ring-4 focus:ring-blue-300"
+                        >
+                            Select Documents
+                        </button>
+                        {selectedFiles.length > 0 && (
+                            <p className="mt-4 text-lg text-gray-700">
+                                Selected <span className="font-semibold text-blue-800">{selectedFiles.length}</span> file(s).
+                            </p>
+                        )}
+                        {error && (
+                            <p className="mt-4 text-red-600 font-medium text-sm">{error}</p>
+                        )}
+                    </div>
+
+                    {/* Processing Options Section for Multiple Files */}
+                    {selectedFiles.length > 0 && (
+                        <div className="mb-8 p-6 bg-gray-50 rounded-xl border border-gray-200">
+                            <h2 className="text-2xl font-bold text-gray-700 mb-5 text-center">Adjust Settings for Selected Documents</h2>
+                            <div className="space-y-8">
+                                {selectedFiles.map((fileItem) => (
+                                    <div key={fileItem.id} className="p-4 border border-gray-300 rounded-lg bg-white shadow-sm relative">
+                                        <button
+                                            onClick={() => removeFile(fileItem.id)}
+                                            className="absolute top-2 right-2 text-red-500 hover:text-red-700 text-xl font-bold"
+                                            title="Remove this file"
+                                        >
+                                            &times;
+                                        </button>
+                                        <h3 className="text-xl font-semibold text-gray-800 mb-4 truncate pr-8">
+                                            {fileItem.file.name}
+                                        </h3>
+                                        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                                            {/* Width Input */}
+                                            <div>
+                                                <label htmlFor={`width-${fileItem.id}`} className="block text-gray-700 text-sm font-semibold mb-1">
+                                                    Width (px):
+                                                </label>
+                                                <input
+                                                    type="number"
+                                                    id={`width-${fileItem.id}`}
+                                                    value={fileItem.desiredWidth}
+                                                    onChange={(e) => updateFileSetting(fileItem.id, 'desiredWidth', e.target.value)}
+                                                    placeholder="e.g., 800"
+                                                    className="w-full p-2 border border-gray-300 rounded-md focus:ring-1 focus:ring-blue-400 focus:border-transparent transition duration-200"
+                                                />
+                                                <p className="text-xs text-gray-500 mt-1">Leave blank for auto.</p>
+                                            </div>
+
+                                            {/* Height Input */}
+                                            <div>
+                                                <label htmlFor={`height-${fileItem.id}`} className="block text-gray-700 text-sm font-semibold mb-1">
+                                                    Height (px):
+                                                </label>
+                                                <input
+                                                    type="number"
+                                                    id={`height-${fileItem.id}`}
+                                                    value={fileItem.desiredHeight}
+                                                    onChange={(e) => updateFileSetting(fileItem.id, 'desiredHeight', e.target.value)}
+                                                    placeholder="e.g., 600"
+                                                    className="w-full p-2 border border-gray-300 rounded-md focus:ring-1 focus:ring-blue-400 focus:border-transparent transition duration-200"
+                                                />
+                                                <p className="text-xs text-gray-500 mt-1">Leave blank for auto.</p>
+                                            </div>
+
+                                            {/* Output Format Dropdown */}
+                                            <div>
+                                                <label htmlFor={`format-${fileItem.id}`} className="block text-gray-700 text-sm font-semibold mb-1">
+                                                    File Type:
+                                                </label>
+                                                <select
+                                                    id={`format-${fileItem.id}`}
+                                                    value={fileItem.outputFormat}
+                                                    onChange={(e) => updateFileSetting(fileItem.id, 'outputFormat', e.target.value)}
+                                                    className="w-full p-2 border border-gray-300 rounded-md focus:ring-1 focus:ring-blue-400 focus:border-transparent bg-white appearance-none pr-8 transition duration-200"
+                                                >
+                                                    <option value="image/png">PNG</option>
+                                                    <option value="image/jpeg">JPEG</option>
+                                                    <option value="image/webp">WebP</option>
+                                                    <option value="application/pdf">PDF</option>
+                                                </select>
+                                            </div>
+
+                                            {/* Quality Input */}
+                                            <div>
+                                                <label htmlFor={`quality-${fileItem.id}`} className="block text-gray-700 text-sm font-semibold mb-1">
+                                                    Quality (0-100):
+                                                </label>
+                                                <input
+                                                    type="number"
+                                                    id={`quality-${fileItem.id}`}
+                                                    value={fileItem.quality}
+                                                    onChange={(e) => updateFileSetting(fileItem.id, 'quality', parseInt(e.target.value, 10) || 0)}
+                                                    min="0"
+                                                    max="100"
+                                                    placeholder="e.g., 90"
+                                                    className="w-full p-2 border border-gray-300 rounded-md focus:ring-1 focus:ring-blue-400 focus:border-transparent transition duration-200"
+                                                />
+                                                <p className="text-xs text-gray-500 mt-1">Primarily affects JPEG/WebP size.</p>
+                                            </div>
+                                        </div>
+
+                                        {/* AI Alt Text Generation Section */}
+                                        <div className="mt-6 border-t border-gray-200 pt-4">
+                                            <h4 className="text-lg font-semibold text-gray-700 mb-2">AI Alt Text Generation</h4>
+                                            <button
+                                                onClick={() => generateAltText(fileItem.id)}
+                                                disabled={fileItem.isGeneratingAltText || !fileItem.file.type.startsWith('image/')}
+                                                className={`bg-indigo-500 hover:bg-indigo-600 text-white font-bold py-2 px-4 rounded-full text-sm shadow-md transform transition duration-300 ease-in-out hover:scale-105 focus:outline-none focus:ring-2 focus:ring-indigo-300 ${fileItem.isGeneratingAltText || !fileItem.file.type.startsWith('image/') ? 'opacity-60 cursor-not-allowed' : ''}`}
+                                            >
+                                                {fileItem.isGeneratingAltText ? 'Generating... ✨' : 'Generate Alt Text ✨'}
+                                            </button>
+                                            {fileItem.altText && (
+                                                <div className="mt-3">
+                                                    <label htmlFor={`alt-text-${fileItem.id}`} className="block text-gray-700 text-sm font-semibold mb-1">
+                                                        Generated Alt Text:
+                                                    </label>
+                                                    <textarea
+                                                        id={`alt-text-${fileItem.id}`}
+                                                        value={fileItem.altText}
+                                                        onChange={(e) => updateFileSetting(fileItem.id, 'altText', e.target.value)}
+                                                        rows="3"
+                                                        className="w-full p-2 border border-gray-300 rounded-md focus:ring-1 focus:ring-indigo-400 focus:border-transparent text-sm"
+                                                        placeholder="Alt text will appear here..."
+                                                    ></textarea>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+
+                            {/* Process Button */}
+                            <div className="mt-8 text-center">
+                                <button
+                                    onClick={processAllImages}
+                                    disabled={isLoading || !isJsPdfLoaded}
+                                    className={`bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-8 rounded-full shadow-lg transform transition duration-300 ease-in-out hover:scale-105 focus:outline-none focus:ring-4 focus:ring-green-300 ${isLoading || !isJsPdfLoaded ? 'opacity-60 cursor-not-allowed' : ''}`}
+                                >
+                                    {isLoading ? 'Processing All...' : 'Process All Documents'}
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Processed Images Display Section */}
+                    {processedFiles.length > 0 && (
+                        <div className="mt-8 p-6 bg-white rounded-xl shadow-inner border border-gray-200 text-center">
+                            <h2 className="text-2xl font-bold text-gray-700 mb-5">Processed Documents</h2>
+                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                                {processedFiles.map((fileItem) => (
+                                    <div key={fileItem.id} className="p-4 border border-gray-200 rounded-lg shadow-md bg-gray-50">
+                                        <h3 className="text-lg font-semibold text-gray-800 mb-3 truncate">
+                                            {fileItem.file.name}
+                                        </h3>
+                                        {fileItem.processingError ? (
+                                            <p className="text-red-600 text-sm">{fileItem.processingError}</p>
+                                        ) : (
+                                            <>
+                                                {/* Display image preview only if it's an image */}
+                                                {fileItem.outputFormat !== 'application/pdf' ? (
+                                                    <img
+                                                        src={fileItem.processedUrl}
+                                                        alt={fileItem.altText || `Processed ${fileItem.file.name}`}
+                                                        className="max-w-full h-auto rounded-lg mx-auto mb-4 border border-gray-300"
+                                                        style={{ maxWidth: '200px', maxHeight: '150px' }}
+                                                    />
+                                                ) : (
+                                                    <div className="flex items-center justify-center h-36 bg-gray-200 rounded-lg mb-4 text-gray-600">
+                                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-12 w-12 text-red-500" viewBox="0 0 20 20" fill="currentColor">
+                                                            <path fillRule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L14.414 5A2 2 0 0115 6.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 2h2v2H6V6zm0 4h8v4H6v-4z" clipRule="evenodd" />
+                                                        </svg>
+                                                        <span className="ml-2">PDF Ready</span>
+                                                    </div>
+                                                )}
+                                                <p className="text-sm text-gray-600 mb-2">
+                                                    Size: <span className="font-semibold">{formatBytes(fileItem.processedSize)}</span>
+                                                </p>
+                                                <button
+                                                    onClick={() => downloadProcessedImage(fileItem)}
+                                                    className="bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded-full text-sm shadow-md transform transition duration-300 ease-in-out hover:scale-105 focus:outline-none focus:ring-2 focus:ring-purple-300"
+                                                >
+                                                    Download
+                                                </button>
+                                            </>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    <p className="text-center text-gray-500 text-sm mt-8">
+                        Built with ❤️ by a professional developer s.sha
+                    </p>
+                </div>
+            );
+        };
+
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+</html>
